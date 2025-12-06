@@ -36,7 +36,7 @@ MQTT_PASSWORD = ".09yUhd13*nZF?A#rjKT"
 MQTT_CLIENT_ID = f"streamlit-iot-{int(time.time())}"
 
 # Topics
-MQTT_TOPIC_SUBSCRIBE = "iot/sensor/data"
+MQTT_TOPIC_SUBSCRIBE = "iot/model/ml"
 MQTT_TOPIC_PUBLISH = "iot/predict/ml"
 MQTT_TOPIC_CONTROL = "iot/control/ml"
 
@@ -1635,3 +1635,4 @@ if __name__ == "__main__":
         # Auto-refresh
         time.sleep(2)
         st.rerun()
+
