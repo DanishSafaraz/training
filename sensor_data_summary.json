@@ -1,0 +1,18 @@
+{
+  "total_records": 15,
+  "temperature_stats": {
+    "min": 24.4,
+    "max": 24.4,
+    "mean": 24.39999999999999,
+    "std": 7.354816055834102e-15
+  },
+  "humidity_stats": {
+    "min": 42.2,
+    "max": 42.3,
+    "mean": 42.21333333333334,
+    "std": 0.03518657752744783
+  },
+  "label_distribution": {
+    "NORMAL": 15
+  }
+}

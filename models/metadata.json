@@ -1,0 +1,36 @@
+{
+    "training_date": "2025-12-06 12:01:04",
+    "models_trained": [
+        "Decision Tree",
+        "K-Nearest Neighbors",
+        "Logistic Regression"
+    ],
+    "performance": {
+        "Decision Tree": {
+            "accuracy": 1.0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1_score": 1.0,
+            "cv_mean": 0.923391812865497,
+            "cv_std": 0.04504822262589648
+        },
+        "K-Nearest Neighbors": {
+            "accuracy": 0.9565217391304348,
+            "precision": 0.9627329192546583,
+            "recall": 0.9565217391304348,
+            "f1_score": 0.9565217391304348,
+            "cv_mean": 0.9128654970760234,
+            "cv_std": 0.02707798105915842
+        },
+        "Logistic Regression": {
+            "accuracy": 1.0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1_score": 1.0,
+            "cv_mean": 0.9450292397660819,
+            "cv_std": 0.06086929970006668
+        }
+    },
+    "mqtt_topic": "iot/model/ml",
+    "note": "All 3 models trained: DT, KNN, LR"
+}
