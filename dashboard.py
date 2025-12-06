@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
 from datetime import datetime
 import pickle
 import joblib
@@ -22,16 +20,16 @@ MODELS_DIR = os.path.join(BASE_DIR, "models")
 MQTT_BROKER = "48be83e63863499c87afce855025c93e.s1.eu.hivemq.cloud"
 MQTT_PORT = 8883
 MQTT_USERNAME = "hivemq.webclient.1764992629489"
-MQTT_PASSWORD = ".09yUhd13*nZF?A#rjKT"   # GANTI
+MQTT_PASSWORD = ".09yUhd13*nZF?A#rjKT"
 
 # Topics
-MQTT_TOPIC_SUBSCRIBE = "iot/model/ml"      # Untuk terima data sensor
-MQTT_TOPIC_PUBLISH = "iot/predict/ml"      # Untuk trigger predict
-MQTT_TOPIC_CONTROL = "iot/control/ml"      # Untuk kontrol Arduino
+MQTT_TOPIC_SUBSCRIBE = "iot/sensor/data"      # Untuk terima data sensor
+MQTT_TOPIC_PUBLISH = "iot/predict/ml"         # Untuk trigger predict
+MQTT_TOPIC_CONTROL = "iot/control/ml"         # Untuk kontrol Arduino
 
 # ==================== PAGE CONFIG ====================
 st.set_page_config(
-    page_title="IoT ML Dashboard - MQTT Control",
+    page_title="IoT ML Dashboard",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -41,20 +39,18 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main-title {
-        font-size: 2.8rem;
-        background: linear-gradient(90deg, #1E88E5, #4A90E2, #64B5F6);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
+        font-size: 2.5rem;
+        color: #1E88E5;
         text-align: center;
-        font-weight: bold;
         margin-bottom: 1rem;
     }
-    .mqtt-card {
+    .metric-card {
         background: white;
         border-radius: 10px;
         padding: 15px;
-        margin: 10px 0;
+        margin: 10px;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        text-align: center;
     }
     .status-connected {
         color: #2ECC71;
@@ -63,6 +59,14 @@ st.markdown("""
     .status-disconnected {
         color: #E74C3C;
         font-weight: bold;
+    }
+    .prediction-card {
+        background: white;
+        border-radius: 10px;
+        padding: 20px;
+        margin: 10px 0;
+        border-left: 5px solid;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
 </style>
 """, unsafe_allow_html=True)
@@ -91,7 +95,7 @@ def setup_mqtt():
         if rc == 0:
             st.session_state.mqtt_connected = True
             client.subscribe(MQTT_TOPIC_SUBSCRIBE)
-            print(f"✅ Subscribed to {MQTT_TOPIC_SUBSCRIBE}")
+            st.success(f"✅ Subscribed to {MQTT_TOPIC_SUBSCRIBE}")
         else:
             st.error(f"❌ MQTT Connection failed: {rc}")
     
@@ -125,7 +129,7 @@ def setup_mqtt():
             st.rerun()
             
         except Exception as e:
-            print(f"Error processing MQTT message: {e}")
+            st.error(f"Error processing MQTT message: {e}")
     
     try:
         client = mqtt.Client(client_id=f"dashboard_{int(time.time())}")
@@ -201,6 +205,7 @@ def load_all_models():
     
     if not os.path.exists(MODELS_DIR):
         st.error(f"❌ Folder 'models' tidak ditemukan!")
+        st.info(f"Path: {MODELS_DIR}")
         return False
     
     pkl_files = [f for f in os.listdir(MODELS_DIR) if f.endswith('.pkl')]
@@ -247,16 +252,15 @@ def load_all_models():
     return ml_count > 0
 
 # ==================== PREDICTION FUNCTIONS ====================
-def make_prediction_local(temperature, humidity, hour=None, minute=None):
+def make_prediction_local(temperature, humidity):
     """Buat prediksi lokal dengan model yang diload"""
     
     if not st.session_state.ml_models:
         return {}
     
-    if hour is None or minute is None:
-        now = datetime.now()
-        hour = now.hour
-        minute = now.minute
+    now = datetime.now()
+    hour = now.hour
+    minute = now.minute
     
     features = np.array([[temperature, humidity, hour, minute]])
     
@@ -302,9 +306,10 @@ def make_prediction_local(temperature, humidity, hour=None, minute=None):
         except Exception as e:
             predictions[model_name] = {
                 'prediction': None,
-                'label': f"ERROR: {str(e)[:30]}",
+                'label': f"ERROR",
                 'confidence': 0.0,
-                'model_type': model_info['type']
+                'model_type': model_info['type'],
+                'error': str(e)[:50]
             }
     
     # Save to history
@@ -334,7 +339,7 @@ def render_sidebar():
         col1, col2 = st.columns(2)
         with col1:
             if not st.session_state.mqtt_connected:
-                if st.button("🔗 Connect MQTT", use_container_width=True):
+                if st.button("🔗 Connect MQTT", use_container_width=True, type="primary"):
                     with st.spinner("Connecting..."):
                         if setup_mqtt():
                             st.success("Connected!")
@@ -378,7 +383,7 @@ def render_sidebar():
         st.subheader("🚀 MQTT Controls")
         
         # Trigger Prediction Button
-        if st.button("🔮 Request Sensor Data", use_container_width=True, type="primary"):
+        if st.button("📡 Request Sensor Data", use_container_width=True, type="primary"):
             if st.session_state.mqtt_connected:
                 trigger_prediction()
             else:
@@ -422,14 +427,16 @@ def render_sidebar():
 # ==================== MAIN DASHBOARD ====================
 def main():
     # Header
-    st.markdown("<h1 class='main-title'>🤖 IoT ML Dashboard - MQTT Control</h1>", unsafe_allow_html=True)
-    st.markdown("<h4 style='text-align: center; color: #666;'>Streamlit → MQTT → Arduino → Predictions</h4>", unsafe_allow_html=True)
+    st.markdown("<h1 class='main-title'>🤖 IoT ML Dashboard</h1>", unsafe_allow_html=True)
+    st.markdown("<h4 style='text-align: center; color: #666;'>Streamlit Cloud Deployment - No Plotly</h4>", unsafe_allow_html=True)
     st.markdown("---")
     
     # Render sidebar
     render_sidebar()
     
-    # Row 1: Connection Status
+    # Row 1: Status Cards
+    st.subheader("📊 Dashboard Status")
+    
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
@@ -439,85 +446,69 @@ def main():
             st.error("📡 MQTT: Disconnected")
     
     with col2:
-        st.metric("📊 Models", len(st.session_state.ml_models))
+        st.metric("🤖 Models", len(st.session_state.ml_models))
     
     with col3:
         if st.session_state.sensor_data:
             latest_temp = st.session_state.sensor_data[-1]['temperature']
-            st.metric("🌡️ Latest Temp", f"{latest_temp:.1f}°C")
+            st.metric("🌡️ Temp", f"{latest_temp:.1f}°C")
         else:
-            st.metric("🌡️ Latest Temp", "N/A")
+            st.metric("🌡️ Temp", "N/A")
     
     with col4:
         if st.session_state.sensor_data:
             latest_hum = st.session_state.sensor_data[-1]['humidity']
-            st.metric("💧 Latest Hum", f"{latest_hum:.1f}%")
+            st.metric("💧 Humid", f"{latest_hum:.1f}%")
         else:
-            st.metric("💧 Latest Hum", "N/A")
+            st.metric("💧 Humid", "N/A")
     
     st.markdown("---")
     
-    # Row 2: Real-time Sensor Data
-    st.subheader("📈 Real-time Sensor Data (from MQTT)")
+    # Row 2: Sensor Data
+    st.subheader("📈 Sensor Data History")
     
     if st.session_state.sensor_data:
         sensor_df = pd.DataFrame(st.session_state.sensor_data)
         
-        col1, col2 = st.columns(2)
+        # Tampilkan data dalam tabel
+        st.dataframe(
+            sensor_df.tail(10).sort_values('timestamp', ascending=False),
+            use_container_width=True,
+            column_config={
+                'timestamp': st.column_config.DatetimeColumn(format="HH:mm:ss"),
+                'temperature': st.column_config.NumberColumn(format="%.1f °C"),
+                'humidity': st.column_config.NumberColumn(format="%.1f %")
+            }
+        )
         
-        with col1:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=sensor_df['timestamp'],
-                y=sensor_df['temperature'],
-                mode='lines+markers',
-                name='Temperature',
-                line=dict(color='red')
-            ))
-            fig.update_layout(
-                title='Temperature Live',
-                height=300,
-                xaxis_title="Time",
-                yaxis_title="Temperature (°C)"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=sensor_df['timestamp'],
-                y=sensor_df['humidity'],
-                mode='lines+markers',
-                name='Humidity',
-                line=dict(color='blue')
-            ))
-            fig.update_layout(
-                title='Humidity Live',
-                height=300,
-                xaxis_title="Time",
-                yaxis_title="Humidity (%)"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Latest MQTT Message
-        if st.session_state.last_mqtt_msg:
-            with st.expander("📨 Latest MQTT Message"):
-                st.write(f"**Topic:** {st.session_state.last_mqtt_msg['topic']}")
-                st.write(f"**Time:** {st.session_state.last_mqtt_msg['timestamp'].strftime('%H:%M:%S')}")
-                st.json(st.session_state.last_mqtt_msg['data'])
+        # Chart sederhana menggunakan st.line_chart
+        if len(sensor_df) > 1:
+            st.subheader("📊 Temperature Trend")
+            chart_data = pd.DataFrame({
+                'Time': sensor_df['timestamp'].dt.strftime('%H:%M'),
+                'Temperature': sensor_df['temperature']
+            }).set_index('Time')
+            st.line_chart(chart_data)
+            
+            st.subheader("📊 Humidity Trend")
+            chart_data = pd.DataFrame({
+                'Time': sensor_df['timestamp'].dt.strftime('%H:%M'),
+                'Humidity': sensor_df['humidity']
+            }).set_index('Time')
+            st.line_chart(chart_data)
     else:
         st.info("📭 No sensor data yet. Connect MQTT and request data.")
     
     st.markdown("---")
     
-    # Row 3: Prediction Results
+    # Row 3: Predictions
     st.subheader("🔮 Prediction Results")
     
     if st.session_state.predictions:
         latest_pred = st.session_state.predictions[-1]
         
-        # Display predictions
         if latest_pred['predictions']:
+            # Display predictions in columns
             pred_items = list(latest_pred['predictions'].items())
             cols = st.columns(len(pred_items))
             
@@ -533,18 +524,18 @@ def main():
                         color = '#2ECC71'
                     
                     st.markdown(f"""
-                    <div class="mqtt-card" style="border-left: 5px solid {color};">
-                        <h4>{model_name}</h4>
+                    <div class="prediction-card" style="border-left-color: {color};">
+                        <h4 style="color: {color};">{model_name}</h4>
                         <h2 style="color: {color}; text-align: center;">{pred_info['label']}</h2>
                         <p style="text-align: center;">Confidence: {pred_info['confidence']:.1%}</p>
-                        <p style="text-align: center; font-size: 0.8em; color: #666;">
+                        <p style="text-align: center; color: #666; font-size: 0.9em;">
                             Type: {pred_info['model_type']}
                         </p>
                     </div>
                     """, unsafe_allow_html=True)
         
-        # Prediction History
-        with st.expander("📜 Prediction History"):
+        # Prediction History Table
+        with st.expander("📜 View Prediction History"):
             history_data = []
             for pred in st.session_state.predictions[-10:]:
                 row = {
@@ -553,46 +544,65 @@ def main():
                     'Humid': f"{pred['humidity']:.1f}%",
                     'Type': pred['type']
                 }
-                # Add model predictions
+                
+                # Add predictions for each model
                 for model_name in st.session_state.ml_models.keys():
                     if model_name in pred['predictions']:
                         row[model_name] = pred['predictions'][model_name]['label']
+                    else:
+                        row[model_name] = 'N/A'
                 
                 history_data.append(row)
             
             if history_data:
                 history_df = pd.DataFrame(history_data)
                 st.dataframe(history_df, use_container_width=True, hide_index=True)
-    
     else:
         st.info("No predictions yet. Load models and make predictions.")
     
-    # Row 4: Quick Actions
+    # Row 4: Latest MQTT Message
+    if st.session_state.last_mqtt_msg:
+        st.markdown("---")
+        st.subheader("📨 Latest MQTT Message")
+        
+        with st.expander("View Message Details"):
+            msg = st.session_state.last_mqtt_msg
+            st.write(f"**Topic:** {msg['topic']}")
+            st.write(f"**Time:** {msg['timestamp'].strftime('%H:%M:%S')}")
+            st.json(msg['data'])
+    
+    # Row 5: Quick Actions
     st.markdown("---")
     st.subheader("⚡ Quick Actions")
     
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        if st.button("📡 Request Data", help="Request sensor data from Arduino"):
+        if st.button("📡 Request Data"):
             if st.session_state.mqtt_connected:
                 trigger_prediction()
     
     with col2:
-        if st.button("🧠 Predict Latest", help="Predict with latest sensor data"):
+        if st.button("🧠 Predict Latest"):
             if st.session_state.sensor_data:
                 latest = st.session_state.sensor_data[-1]
                 make_prediction_local(latest['temperature'], latest['humidity'])
                 st.rerun()
     
     with col3:
-        if st.button("📊 Show Raw Data", help="Show raw sensor data"):
+        if st.button("📥 Export Data"):
             if st.session_state.sensor_data:
                 sensor_df = pd.DataFrame(st.session_state.sensor_data)
-                st.dataframe(sensor_df.tail(10), use_container_width=True)
+                csv = sensor_df.to_csv(index=False)
+                st.download_button(
+                    label="Download CSV",
+                    data=csv,
+                    file_name=f"sensor_data_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
     
     with col4:
-        if st.button("🗑️ Clear All", help="Clear all data"):
+        if st.button("🗑️ Clear Data"):
             st.session_state.sensor_data = []
             st.session_state.predictions = []
             st.rerun()
@@ -600,11 +610,11 @@ def main():
     # Footer
     st.markdown("---")
     st.markdown(f"""
-    <div style="text-align: center; padding: 15px; background: #f8f9fa; border-radius: 10px;">
+    <div style="text-align: center; padding: 20px; background: #f8f9fa; border-radius: 10px;">
+        <p><strong>🚀 Deployed on Streamlit Cloud</strong></p>
         <p><strong>MQTT Topics:</strong> 
         Publish: <code>{MQTT_TOPIC_PUBLISH}</code> | 
-        Subscribe: <code>{MQTT_TOPIC_SUBSCRIBE}</code> |
-        Control: <code>{MQTT_TOPIC_CONTROL}</code>
+        Subscribe: <code>{MQTT_TOPIC_SUBSCRIBE}</code>
         </p>
         <p>🕐 Last update: {datetime.now().strftime('%H:%M:%S')}</p>
     </div>
@@ -612,7 +622,7 @@ def main():
     
     # Auto-refresh jika MQTT connected
     if st.session_state.mqtt_connected:
-        time.sleep(3)
+        time.sleep(5)
         st.rerun()
 
 # ==================== RUN APP ====================
