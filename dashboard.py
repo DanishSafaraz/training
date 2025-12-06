@@ -12,11 +12,21 @@ import paho.mqtt.client as mqtt
 import ssl
 import socket
 import random
+import io
+from pathlib import Path
 warnings.filterwarnings('ignore')
 
 # ==================== CONFIG ====================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
 MODELS_DIR = os.path.join(BASE_DIR, "models")
+
+# Create directories if they don't exist
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(MODELS_DIR, exist_ok=True)
+
+# Sample CSV data (will be created if doesn't exist)
+SAMPLE_CSV_PATH = os.path.join(DATA_DIR, "sample_sensor_data.csv")
 
 # MQTT Configuration for HiveMQ Cloud
 MQTT_BROKER = "48be83e63863499c87afce855025c93e.s1.eu.hivemq.cloud"
@@ -96,6 +106,13 @@ st.markdown("""
         margin: 10px 0;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
+    .csv-upload-section {
+        background: #f8f9fa;
+        border-radius: 10px;
+        padding: 20px;
+        margin: 10px 0;
+        border: 2px dashed #dee2e6;
+    }
     .stTabs [data-baseweb="tab-list"] {
         gap: 2px;
     }
@@ -108,8 +125,177 @@ st.markdown("""
         padding-top: 10px;
         padding-bottom: 10px;
     }
+    .data-source-badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 0.8em;
+        font-weight: bold;
+        margin: 2px;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+# ==================== DATA MANAGEMENT ====================
+def create_sample_csv():
+    """Create a sample CSV file with sensor data"""
+    try:
+        # Generate sample data
+        np.random.seed(42)
+        dates = pd.date_range(start='2024-01-01', end='2024-01-31', freq='H')
+        n_samples = len(dates)
+        
+        # Generate realistic sensor data
+        temperatures = np.random.normal(25, 5, n_samples)
+        humidities = np.random.normal(65, 15, n_samples)
+        
+        # Add some patterns
+        for i in range(n_samples):
+            # Daily pattern for temperature
+            hour = dates[i].hour
+            if 2 <= hour <= 6:  # Early morning - cooler
+                temperatures[i] -= 3
+            elif 12 <= hour <= 16:  # Afternoon - warmer
+                temperatures[i] += 4
+            
+            # Inverse relationship with humidity
+            humidities[i] = max(30, min(90, 80 - (temperatures[i] - 25) * 2))
+            
+            # Add some random sensor errors
+            if i % 50 == 0:
+                temperatures[i] = -999  # Error value
+            if i % 75 == 0:
+                humidities[i] = 150  # Error value
+        
+        # Create DataFrame
+        df = pd.DataFrame({
+            'timestamp': dates,
+            'temperature': np.round(temperatures, 2),
+            'humidity': np.round(humidities, 1),
+            'device_id': ['sensor_01'] * (n_samples//2) + ['sensor_02'] * (n_samples - n_samples//2),
+            'location': np.random.choice(['indoors', 'outdoors'], n_samples),
+            'status': np.random.choice(['normal', 'warning', 'error'], n_samples, p=[0.85, 0.1, 0.05])
+        })
+        
+        # Save to CSV
+        df.to_csv(SAMPLE_CSV_PATH, index=False)
+        print(f"✅ Created sample CSV at: {SAMPLE_CSV_PATH}")
+        return df
+        
+    except Exception as e:
+        print(f"❌ Error creating sample CSV: {e}")
+        return None
+
+def load_csv_data(file_path=None, uploaded_file=None, n_rows=100):
+    """Load sensor data from CSV file"""
+    try:
+        if uploaded_file is not None:
+            # Read from uploaded file
+            if uploaded_file.name.endswith('.csv'):
+                df = pd.read_csv(uploaded_file)
+            elif uploaded_file.name.endswith('.xlsx') or uploaded_file.name.endswith('.xls'):
+                df = pd.read_excel(uploaded_file)
+            else:
+                st.error("Unsupported file format. Please upload CSV or Excel file.")
+                return None
+        elif file_path and os.path.exists(file_path):
+            # Read from file path
+            df = pd.read_csv(file_path)
+        else:
+            return None
+        
+        print(f"📊 Loaded DataFrame shape: {df.shape}")
+        print(f"📊 DataFrame columns: {df.columns.tolist()}")
+        
+        # Clean column names (strip whitespace, lowercase)
+        df.columns = [str(col).strip().lower() for col in df.columns]
+        
+        # Find timestamp column
+        timestamp_cols = ['timestamp', 'datetime', 'date', 'time', 'created_at']
+        timestamp_col = None
+        for col in timestamp_cols:
+            if col in df.columns:
+                timestamp_col = col
+                break
+        
+        # Find temperature column
+        temp_cols = ['temperature', 'temp', 'temp_c', 'temp_celsius', 'suhu']
+        temp_col = None
+        for col in temp_cols:
+            if col in df.columns:
+                temp_col = col
+                break
+        
+        # Find humidity column
+        humid_cols = ['humidity', 'humid', 'humidity_percent', 'kelembaban']
+        humid_col = None
+        for col in humid_cols:
+            if col in df.columns:
+                humid_col = col
+                break
+        
+        # Convert timestamp if found
+        if timestamp_col:
+            try:
+                df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+            except:
+                print(f"⚠️ Could not parse timestamp column: {timestamp_col}")
+        
+        # Limit number of rows
+        df = df.head(n_rows)
+        
+        # Convert to list of dictionaries for session state
+        sensor_data = []
+        for idx, row in df.iterrows():
+            data_point = {
+                'timestamp': row[timestamp_col] if timestamp_col and timestamp_col in row else datetime.now() - timedelta(minutes=len(df)-idx),
+                'temperature': float(row[temp_col]) if temp_col and temp_col in row else random.uniform(20, 30),
+                'humidity': float(row[humid_col]) if humid_col and humid_col in row else random.uniform(40, 80),
+                'source': 'csv',
+                'device_id': str(row.get('device_id', row.get('device', f'csv_device_{idx}'))) if 'device_id' in df.columns or 'device' in df.columns else 'csv_device',
+                'row_index': idx,
+                'raw_data': row.to_dict()
+            }
+            
+            # Add additional columns if they exist
+            for col in df.columns:
+                if col not in ['timestamp', 'temperature', 'humidity', 'device_id']:
+                    data_point[col] = row[col]
+            
+            sensor_data.append(data_point)
+        
+        print(f"✅ Loaded {len(sensor_data)} data points from CSV")
+        return sensor_data
+        
+    except Exception as e:
+        print(f"❌ Error loading CSV data: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def generate_sample_sensor_data(n_points=10):
+    """Generate sample sensor data untuk demo"""
+    print(f"📊 Generating {n_points} sample sensor data points...")
+    
+    sensor_data = []
+    base_time = datetime.now()
+    
+    for i in range(n_points):
+        temp = random.uniform(20.0, 30.0)
+        hum = random.uniform(40.0, 80.0)
+        
+        sensor_data.append({
+            'timestamp': base_time - timedelta(minutes=(n_points-1-i) * 5),
+            'temperature': round(temp, 2),
+            'humidity': round(hum, 2),
+            'source': 'demo',
+            'device_id': f'demo_sensor_{random.choice(["01", "02", "03"])}',
+            'location': random.choice(['indoors', 'outdoors']),
+            'status': 'normal'
+        })
+    
+    print(f"✅ Generated {len(sensor_data)} demo data points")
+    return sensor_data
 
 # ==================== MQTT CLIENT ====================
 class MQTTClient:
@@ -153,7 +339,6 @@ class MQTTClient:
                     result_subscribe = client.subscribe(MQTT_TOPIC_SUBSCRIBE, qos=1)
                     result_control = client.subscribe(MQTT_TOPIC_CONTROL, qos=1)
                     print(f"✅ Subscribed to topics: {MQTT_TOPIC_SUBSCRIBE}, {MQTT_TOPIC_CONTROL}")
-                    print(f"Subscribe result: {result_subscribe}, Control result: {result_control}")
                     
                     # Store in session state for UI
                     st.session_state.mqtt_connected = True
@@ -284,17 +469,6 @@ class MQTTClient:
                             except (ValueError, TypeError):
                                 pass
                     
-                    # If no temperature/humidity found, check for nested structures
-                    if temp is None or humid is None:
-                        # Check if data is a string that might contain the values
-                        if isinstance(data, str):
-                            # Try to extract numbers from string
-                            import re
-                            numbers = re.findall(r'\d+\.?\d*', data)
-                            if len(numbers) >= 2:
-                                temp = float(numbers[0]) if temp is None else temp
-                                humid = float(numbers[1]) if humid is None else humid
-                    
                     print(f"📊 Extracted - Temp: {temp}, Humid: {humid}")
                     
                     if temp is not None and humid is not None:
@@ -311,9 +485,9 @@ class MQTTClient:
                         # Add to sensor data history
                         st.session_state.sensor_data.append(sensor_entry)
                         
-                        # Keep only last 100 entries
-                        if len(st.session_state.sensor_data) > 100:
-                            st.session_state.sensor_data = st.session_state.sensor_data[-100:]
+                        # Keep only last 1000 entries
+                        if len(st.session_state.sensor_data) > 1000:
+                            st.session_state.sensor_data = st.session_state.sensor_data[-1000:]
                         
                         # Store last message
                         st.session_state.last_mqtt_msg = message_data
@@ -409,8 +583,6 @@ class MQTTClient:
                 )
                 
                 print(f"🔗 Connecting to {MQTT_BROKER}:{MQTT_PORT}...")
-                print(f"📝 Username: {MQTT_USERNAME}")
-                print(f"🔑 Password: {'*' * len(MQTT_PASSWORD)}")
                 
                 # Connect with timeout
                 self.client.connect_async(
@@ -595,7 +767,10 @@ def init_session_state():
         'demo_data_generated': False,
         'last_prediction_time': None,
         'chart_data': pd.DataFrame(),
-        'initialized': False
+        'initialized': False,
+        'csv_loaded': False,
+        'data_sources': set(),
+        'current_csv_file': None
     }
     
     for key, default_value in defaults.items():
@@ -606,42 +781,22 @@ def init_session_state():
     if st.session_state.mqtt_client is None:
         st.session_state.mqtt_client = MQTTClient()
     
+    # Create sample CSV if it doesn't exist
+    if not os.path.exists(SAMPLE_CSV_PATH):
+        create_sample_csv()
+    
     # Generate initial demo data if not exists
-    if not st.session_state.demo_data_generated:
-        generate_initial_demo_data()
+    if not st.session_state.demo_data_generated and len(st.session_state.sensor_data) == 0:
+        demo_data = generate_sample_sensor_data(15)
+        st.session_state.sensor_data.extend(demo_data)
+        st.session_state.data_sources.add('demo')
         st.session_state.demo_data_generated = True
     
     st.session_state.initialized = True
 
-def generate_initial_demo_data():
-    """Generate initial demo sensor data"""
-    print("📊 Generating initial demo data...")
-    
-    # Generate 20 demo data points
-    base_time = datetime.now()
-    for i in range(20):
-        temp = random.uniform(22.0, 28.0)
-        hum = random.uniform(45.0, 75.0)
-        
-        st.session_state.sensor_data.append({
-            'timestamp': base_time - timedelta(minutes=(19-i) * 5),  # 5 minute intervals
-            'temperature': round(temp, 1),
-            'humidity': round(hum, 1),
-            'source': 'demo',
-            'device_id': 'demo_sensor_01',
-            'topic': 'demo'
-        })
-    
-    # Generate initial predictions
-    if st.session_state.sensor_data:
-        latest = st.session_state.sensor_data[-1]
-        make_prediction_local(latest['temperature'], latest['humidity'])
-    
-    print(f"✅ Generated {len(st.session_state.sensor_data)} demo data points")
-
-# ==================== SIMULATED FUNCTIONS ====================
+# ==================== ML FUNCTIONS ====================
 def load_all_models():
-    """Simulasi load models"""
+    """Load machine learning models"""
     st.session_state.ml_models = {
         'Decision Tree': {'type': 'Classifier', 'accuracy': 0.85, 'color': '#3498DB'},
         'KNN': {'type': 'Classifier', 'accuracy': 0.82, 'color': '#2ECC71'},
@@ -652,7 +807,7 @@ def load_all_models():
     return True
 
 def make_prediction_local(temperature, humidity):
-    """Simulasi prediksi"""
+    """Make prediction using loaded models"""
     if not st.session_state.ml_models:
         print("⚠️ No models loaded for prediction")
         return {}
@@ -737,29 +892,11 @@ def make_prediction_local(temperature, humidity):
     st.session_state.predictions.append(history_entry)
     st.session_state.last_prediction_time = datetime.now()
     
-    if len(st.session_state.predictions) > 50:
-        st.session_state.predictions = st.session_state.predictions[-50:]
+    if len(st.session_state.predictions) > 100:
+        st.session_state.predictions = st.session_state.predictions[-100:]
     
     print(f"✅ Prediction made with {len(predictions)} models")
     return predictions
-
-def generate_sample_sensor_data():
-    """Generate sample sensor data untuk demo"""
-    print("📊 Generating sample sensor data...")
-    
-    for i in range(5):
-        temp = random.uniform(20, 30)
-        hum = random.uniform(40, 80)
-        
-        st.session_state.sensor_data.append({
-            'timestamp': datetime.now() - timedelta(minutes=4-i),
-            'temperature': round(temp, 2),
-            'humidity': round(hum, 2),
-            'source': 'demo',
-            'device_id': 'demo_sensor_01'
-        })
-    
-    print(f"✅ Added {5} new demo data points")
 
 # ==================== SIDEBAR ====================
 def render_sidebar():
@@ -801,7 +938,7 @@ def render_sidebar():
                 if st.button("🔗 Connect", use_container_width=True, type="primary"):
                     with st.spinner("Connecting to HiveMQ Cloud..."):
                         client.connect_async()
-                        time.sleep(1)  # Small delay for connection attempt
+                        time.sleep(1)
                         st.rerun()
             elif client.connecting:
                 st.button("🔄 Connecting...", use_container_width=True, disabled=True)
@@ -817,11 +954,83 @@ def render_sidebar():
             else:
                 st.button("🔌 Disconnect", use_container_width=True, disabled=True)
         
+        # CSV Data Upload Section
+        st.markdown("---")
+        st.subheader("📁 CSV Data Source")
+        
+        # File uploader
+        uploaded_file = st.file_uploader(
+            "Upload CSV or Excel file",
+            type=['csv', 'xlsx', 'xls'],
+            help="Upload sensor data in CSV or Excel format"
+        )
+        
+        if uploaded_file is not None:
+            # Load CSV button
+            if st.button("📂 Load CSV Data", use_container_width=True, type="secondary"):
+                with st.spinner("Loading data from CSV..."):
+                    csv_data = load_csv_data(uploaded_file=uploaded_file, n_rows=500)
+                    if csv_data:
+                        # Add CSV data to existing data
+                        st.session_state.sensor_data.extend(csv_data)
+                        st.session_state.data_sources.add('csv')
+                        st.session_state.csv_loaded = True
+                        st.session_state.current_csv_file = uploaded_file.name
+                        
+                        st.success(f"✅ Loaded {len(csv_data)} data points from {uploaded_file.name}")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to load data from CSV")
+        
+        # Load sample CSV
+        if st.button("📊 Load Sample CSV", use_container_width=True):
+            with st.spinner("Loading sample CSV data..."):
+                csv_data = load_csv_data(file_path=SAMPLE_CSV_PATH, n_rows=200)
+                if csv_data:
+                    # Add CSV data to existing data
+                    st.session_state.sensor_data.extend(csv_data)
+                    st.session_state.data_sources.add('csv')
+                    st.session_state.csv_loaded = True
+                    st.session_state.current_csv_file = "sample_sensor_data.csv"
+                    
+                    st.success(f"✅ Loaded {len(csv_data)} data points from sample CSV")
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to load sample CSV")
+        
+        # Show data sources
+        if st.session_state.data_sources:
+            st.write("**Data Sources:**")
+            for source in st.session_state.data_sources:
+                color = {
+                    'demo': '#3498DB',
+                    'csv': '#2ECC71',
+                    'mqtt': '#E74C3C',
+                    'manual': '#9B59B6'
+                }.get(source, '#95A5A6')
+                
+                st.markdown(f'<span class="data-source-badge" style="background-color: {color}; color: white;">{source.upper()}</span>', unsafe_allow_html=True)
+        
+        # Data Management
+        st.markdown("---")
+        st.subheader("📊 Data Management")
+        
+        # Number of rows to show
+        n_rows = st.slider("Show last N rows", 10, 1000, 100, 10)
+        
+        # Filter by source
+        if st.session_state.data_sources:
+            selected_sources = st.multiselect(
+                "Filter by source",
+                options=list(st.session_state.data_sources),
+                default=list(st.session_state.data_sources)
+            )
+        
         # Quick Stats
-        with st.expander("📊 Quick Stats", expanded=True):
+        with st.expander("📈 Quick Stats", expanded=True):
             st.metric("📨 Messages", stats['messages_received'])
             st.metric("📤 Published", stats['messages_published'])
-            st.metric("📈 Sensor Data", len(st.session_state.sensor_data))
+            st.metric("📊 Data Points", len(st.session_state.sensor_data))
             st.metric("🤖 Predictions", len(st.session_state.predictions))
             
             if st.session_state.last_mqtt_msg:
@@ -869,7 +1078,7 @@ def render_sidebar():
         
         # Demo Controls
         st.markdown("---")
-        st.subheader("🎯 Demo Controls")
+        st.subheader("🎯 Manual Controls")
         
         # Manual prediction controls
         st.write("**Manual Prediction:**")
@@ -913,8 +1122,11 @@ def render_sidebar():
         # Quick action buttons
         col_demo1, col_demo2 = st.columns(2)
         with col_demo1:
-            if st.button("📊 Add Demo Data", use_container_width=True):
-                generate_sample_sensor_data()
+            if st.button("🎲 Add Random Data", use_container_width=True):
+                new_data = generate_sample_sensor_data(5)
+                st.session_state.sensor_data.extend(new_data)
+                st.session_state.data_sources.add('demo')
+                st.success(f"Added {len(new_data)} random data points")
                 st.rerun()
         
         with col_demo2:
@@ -942,9 +1154,29 @@ def render_sidebar():
             st.session_state.sensor_data = []
             st.session_state.predictions = []
             st.session_state.mqtt_messages = []
-            generate_initial_demo_data()  # Regenerate demo data
-            st.success("Data cleared and regenerated!")
+            st.session_state.data_sources.clear()
+            
+            # Regenerate demo data
+            demo_data = generate_sample_sensor_data(15)
+            st.session_state.sensor_data.extend(demo_data)
+            st.session_state.data_sources.add('demo')
+            
+            st.success("Data cleared and demo data regenerated!")
             st.rerun()
+        
+        # Export Data
+        if st.session_state.sensor_data:
+            st.markdown("---")
+            df = pd.DataFrame(st.session_state.sensor_data)
+            csv = df.to_csv(index=False)
+            
+            st.download_button(
+                label="📥 Export Data as CSV",
+                data=csv,
+                file_name=f"sensor_data_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
         
         # Footer
         st.markdown("---")
@@ -955,7 +1187,7 @@ def render_sidebar():
 def render_dashboard():
     # Header
     st.markdown("<h1 class='main-title'>🤖 IoT ML Dashboard</h1>", unsafe_allow_html=True)
-    st.markdown("<h4 style='text-align: center; color: #666;'>Real-time MQTT + Machine Learning Integration</h4>", unsafe_allow_html=True)
+    st.markdown("<h4 style='text-align: center; color: #666;'>CSV Data + MQTT + Machine Learning</h4>", unsafe_allow_html=True)
     
     # Top Metrics Row
     st.markdown("---")
@@ -993,18 +1225,15 @@ def render_dashboard():
         st.metric("🤖 Models", len(st.session_state.ml_models))
     
     with col5:
-        messages_received = st.session_state.mqtt_client.stats['messages_received']
-        st.metric("📨 Messages", messages_received)
+        st.metric("📊 Data Points", len(st.session_state.sensor_data))
     
     # Data Source Info
-    if st.session_state.sensor_data:
-        source_colors = {
-            'mqtt': '#2ECC71',
-            'demo': '#3498DB',
-            'manual': '#9B59B6'
-        }
-        source_color = source_colors.get(latest_source, '#95A5A6')
-        st.caption(f"Latest data source: <span style='color:{source_color}; font-weight:bold'>{latest_source.upper()}</span>", unsafe_allow_html=True)
+    if st.session_state.data_sources:
+        source_text = ", ".join([s.upper() for s in st.session_state.data_sources])
+        st.caption(f"📁 Data sources: {source_text}")
+        
+        if st.session_state.current_csv_file:
+            st.caption(f"📂 Current CSV: {st.session_state.current_csv_file}")
     
     st.markdown("---")
     
@@ -1022,20 +1251,25 @@ def render_dashboard():
                 # Convert to DataFrame for charts
                 df = pd.DataFrame(st.session_state.sensor_data)
                 
+                # Filter by selected sources if any
+                if 'selected_sources' in st.session_state:
+                    df = df[df['source'].isin(st.session_state.selected_sources)]
+                
                 # Temperature Chart
                 st.write("**Temperature Trend**")
                 if len(df) > 1:
-                    chart_df = df.tail(20).copy()
-                    chart_df['time'] = chart_df['timestamp'].dt.strftime('%H:%M')
+                    chart_df = df.tail(50).copy()
                     
                     # Create two charts side by side
                     chart_col1, chart_col2 = st.columns(2)
                     
                     with chart_col1:
-                        st.line_chart(chart_df.set_index('time')[['temperature']])
+                        st.line_chart(chart_df.set_index('timestamp')[['temperature']])
+                        st.caption("Temperature over time")
                     
                     with chart_col2:
-                        st.line_chart(chart_df.set_index('time')[['humidity']])
+                        st.line_chart(chart_df.set_index('timestamp')[['humidity']])
+                        st.caption("Humidity over time")
                 else:
                     st.info("Need more data points for charts")
             
@@ -1071,61 +1305,111 @@ def render_dashboard():
             
             # Add Random Data
             if st.button("🎲 Add Random Data", use_container_width=True):
-                temp = round(random.uniform(20, 30), 2)
-                hum = round(random.uniform(40, 80), 2)
-                
-                st.session_state.sensor_data.append({
-                    'timestamp': datetime.now(),
-                    'temperature': temp,
-                    'humidity': hum,
-                    'source': 'manual',
-                    'device_id': 'manual_input'
-                })
-                
-                # Auto predict if enabled
-                if st.session_state.auto_predict:
-                    make_prediction_local(temp, hum)
-                
-                st.success(f"Added: {temp}°C, {hum}%")
+                new_data = generate_sample_sensor_data(3)
+                st.session_state.sensor_data.extend(new_data)
+                st.session_state.data_sources.add('demo')
+                st.success(f"Added {len(new_data)} random data points")
                 st.rerun()
             
             # Predict Latest
             if st.session_state.sensor_data:
                 if st.button("🧠 Predict Latest", use_container_width=True):
                     latest = st.session_state.sensor_data[-1]
-                    make_prediction_local(latest['temperature'], latest['humidity'])
-                    st.success("Prediction made!")
+                    predictions = make_prediction_local(latest['temperature'], latest['humidity'])
+                    st.success(f"Prediction made with {len(predictions)} models!")
                     st.rerun()
             
             st.markdown("---")
             st.subheader("📈 Current Stats")
             
             stats_df = pd.DataFrame({
-                'Metric': ['Sensor Data', 'Predictions', 'MQTT Messages', 'Models Loaded'],
+                'Metric': ['Sensor Data', 'Predictions', 'MQTT Messages', 'Models Loaded', 'Data Sources'],
                 'Value': [
                     len(st.session_state.sensor_data),
                     len(st.session_state.predictions),
                     st.session_state.mqtt_client.stats['messages_received'],
-                    len(st.session_state.ml_models)
+                    len(st.session_state.ml_models),
+                    len(st.session_state.data_sources)
                 ]
             })
             
             st.dataframe(stats_df, use_container_width=True, hide_index=True)
+            
+            # Data Source Distribution
+            if st.session_state.sensor_data:
+                df = pd.DataFrame(st.session_state.sensor_data)
+                source_counts = df['source'].value_counts()
+                
+                st.markdown("---")
+                st.subheader("📊 Data Sources")
+                for source, count in source_counts.items():
+                    st.write(f"**{source.upper()}**: {count} points")
     
     with tab2:
         # Sensor Data Tab
-        st.subheader("📈 Sensor Data History")
+        st.subheader("📈 Sensor Data Explorer")
         
         if st.session_state.sensor_data:
             # Convert to DataFrame
             df = pd.DataFrame(st.session_state.sensor_data)
             
-            # Sort by timestamp
-            df = df.sort_values('timestamp', ascending=False)
+            # Show data statistics
+            col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+            
+            with col_stat1:
+                if len(df) > 0:
+                    avg_temp = df['temperature'].mean()
+                    st.metric("Avg Temp", f"{avg_temp:.1f}°C")
+            
+            with col_stat2:
+                if len(df) > 0:
+                    avg_hum = df['humidity'].mean()
+                    st.metric("Avg Humid", f"{avg_hum:.1f}%")
+            
+            with col_stat3:
+                if len(df) > 0:
+                    min_temp = df['temperature'].min()
+                    st.metric("Min Temp", f"{min_temp:.1f}°C")
+            
+            with col_stat4:
+                if len(df) > 0:
+                    max_temp = df['temperature'].max()
+                    st.metric("Max Temp", f"{max_temp:.1f}°C")
+            
+            # Data preview
+            st.subheader("📋 Data Preview")
+            
+            # Filter options
+            with st.expander("🔍 Filter Options"):
+                col_filter1, col_filter2 = st.columns(2)
+                
+                with col_filter1:
+                    # Filter by source
+                    if 'source' in df.columns:
+                        sources = df['source'].unique()
+                        selected_sources = st.multiselect(
+                            "Filter by source",
+                            options=list(sources),
+                            default=list(sources)
+                        )
+                        
+                        if selected_sources:
+                            df = df[df['source'].isin(selected_sources)]
+                
+                with col_filter2:
+                    # Filter by temperature range
+                    if 'temperature' in df.columns:
+                        temp_range = st.slider(
+                            "Temperature range (°C)",
+                            float(df['temperature'].min()),
+                            float(df['temperature'].max()),
+                            (float(df['temperature'].min()), float(df['temperature'].max()))
+                        )
+                        df = df[(df['temperature'] >= temp_range[0]) & (df['temperature'] <= temp_range[1])]
             
             # Display in a nice table
             st.dataframe(
-                df.head(20),
+                df.head(100),
                 use_container_width=True,
                 column_config={
                     'timestamp': st.column_config.DatetimeColumn(
@@ -1154,36 +1438,50 @@ def render_dashboard():
                 }
             )
             
-            # Statistics
-            st.subheader("📊 Statistics")
-            stat_col1, stat_col2, stat_col3 = st.columns(3)
-            
-            with stat_col1:
-                if len(df) > 0:
-                    avg_temp = df['temperature'].mean()
-                    st.metric("Avg Temperature", f"{avg_temp:.1f}°C")
-            
-            with stat_col2:
-                if len(df) > 0:
-                    avg_hum = df['humidity'].mean()
-                    st.metric("Avg Humidity", f"{avg_hum:.1f}%")
-            
-            with stat_col3:
-                sources = df['source'].unique()
-                st.metric("Data Sources", len(sources))
+            # Show data info
+            st.caption(f"Showing {len(df)} of {len(st.session_state.sensor_data)} total data points")
             
             # Download button
             csv = df.to_csv(index=False)
             st.download_button(
-                label="📥 Download CSV",
+                label="📥 Download Filtered CSV",
                 data=csv,
-                file_name=f"sensor_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                file_name=f"filtered_sensor_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
                 use_container_width=True
             )
             
         else:
-            st.info("No sensor data available. Add some data using the demo controls.")
+            st.info("No sensor data available. Upload a CSV file or generate demo data.")
+            
+            # Show CSV upload section
+            with st.container():
+                st.markdown('<div class="csv-upload-section">', unsafe_allow_html=True)
+                st.write("### 📁 Upload Your CSV Data")
+                st.write("Upload a CSV file with sensor data. The file should contain:")
+                st.write("- **timestamp** (or similar datetime column)")
+                st.write("- **temperature** (or temp, Temperature, etc.)")
+                st.write("- **humidity** (or humid, Humidity, etc.)")
+                st.write("- Optional: device_id, location, status, etc.")
+                
+                uploaded_file = st.file_uploader(
+                    "Choose a CSV or Excel file",
+                    type=['csv', 'xlsx', 'xls'],
+                    key="csv_uploader_main"
+                )
+                
+                if uploaded_file:
+                    if st.button("📂 Load This CSV File", use_container_width=True):
+                        with st.spinner("Loading data..."):
+                            csv_data = load_csv_data(uploaded_file=uploaded_file, n_rows=500)
+                            if csv_data:
+                                st.session_state.sensor_data.extend(csv_data)
+                                st.session_state.data_sources.add('csv')
+                                st.session_state.csv_loaded = True
+                                st.session_state.current_csv_file = uploaded_file.name
+                                st.success(f"✅ Loaded {len(csv_data)} data points")
+                                st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
     
     with tab3:
         # Predictions Tab
@@ -1250,7 +1548,7 @@ def render_dashboard():
             
             if len(st.session_state.predictions) > 1:
                 history_data = []
-                for pred in st.session_state.predictions[-10:]:
+                for pred in st.session_state.predictions[-20:]:
                     row = {
                         'Time': pred['timestamp'].strftime('%H:%M:%S'),
                         'Temperature': f"{pred['temperature']:.1f}°C",
@@ -1262,6 +1560,7 @@ def render_dashboard():
                     if pred['predictions']:
                         first_model = list(pred['predictions'].values())[0]
                         row['Prediction'] = first_model['label']
+                        row['Confidence'] = f"{first_model['confidence']:.1%}"
                     
                     history_data.append(row)
                 
@@ -1270,26 +1569,13 @@ def render_dashboard():
             
         else:
             st.info("No predictions yet. Load models and make predictions using the sidebar controls.")
-    
-    # Footer
-    st.markdown("---")
-    st.markdown(f"""
-    <div style="text-align: center; padding: 15px; background: #f8f9fa; border-radius: 10px; margin-top: 20px;">
-        <p style="margin: 5px 0;">
-            <strong>🚀 IoT ML Dashboard</strong> | 
-            Broker: <code>{MQTT_BROKER}</code> | 
-            Client ID: <code>{MQTT_CLIENT_ID[:20]}...</code>
-        </p>
-        <p style="margin: 5px 0; color: #666;">
-            📊 {len(st.session_state.sensor_data)} data points | 
-            🤖 {len(st.session_state.predictions)} predictions | 
-            📨 {st.session_state.mqtt_client.stats['messages_received']} MQTT messages
-        </p>
-        <p style="margin: 5px 0; color: #888; font-size: 0.9em;">
-            Last update: {datetime.now().strftime('%H:%M:%S')} | Auto-refresh: Every 2 seconds
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+            
+            # Quick start guide
+            with st.expander("🚀 Quick Start Guide"):
+                st.write("1. **Load ML Models** - Click 'Load All Models' in sidebar")
+                st.write("2. **Load Data** - Upload CSV or use sample data")
+                st.write("3. **Make Predictions** - Use manual controls or auto-predict")
+                st.write("4. **Analyze Results** - View predictions and history here")
 
 # ==================== MAIN APP ====================
 def main():
@@ -1336,7 +1622,7 @@ if __name__ == "__main__":
         pip install paho-mqtt
         ```
         
-        Running in demo mode with simulated data...
+        Running in demo mode with CSV data support...
         """)
         
         # Initialize session state for demo mode
